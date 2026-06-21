@@ -1,0 +1,6 @@
+[submodule "EgoX"]
+	path = EgoX
+	url = https://github.com/DAVIAN-Robotics/EgoX.git
+[submodule "EgoX-shi3z"]
+	path = EgoX-shi3z
+	url = https://github.com/shi3z/EgoX.git

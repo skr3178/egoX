@@ -1,0 +1,5 @@
+# Large dataset metadata — fetch from the Drive link in reference.md
+gdrive_files/
+
+# local tooling
+.gdown-venv/
