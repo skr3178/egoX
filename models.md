@@ -62,6 +62,27 @@ Notes / implications:
 - Download target / cache: default HF cache `~/.cache/huggingface/hub` (home partition, 321 GB free).
   Pull with `HF_HUB_ENABLE_HF_TRANSFER=1 hf download Wan-AI/Wan2.1-I2V-14B-480P-Diffusers`.
 
+#### Integrity verification after start/stop downloads — VERIFIED 2026-06-22 (✅ 33/33 ok)
+
+This snapshot was pulled across **many interrupted (start/stop) downloads**, so it was
+integrity-checked. The download passed cleanly: `33 ok | 0 hash/size-bad | 0 missing |
+0 parse-bad | 0 incomplete` → **all bytes intact** (rev `b184e23`).
+
+How to re-verify any HF snapshot (script: [verify_wan_integrity.py](verify_wan_integrity.py)):
+- **Why it's trustworthy:** HF stores each LFS file under a blob name that **is** its SHA256, and
+  the Hub API (`model_info(..., files_metadata=True)`) exposes the expected `lfs.sha256` + byte
+  size per file. So recomputing the on-disk SHA256 and comparing catches a single flipped/truncated
+  byte — stronger than size-only checks.
+- **Three layers:** (1) no leftover `*.incomplete` files; (2) on-disk SHA256 == Hub `lfs.sha256`
+  + size match, for every LFS file; (3) every `*.safetensors` parses via `safe_open` (catches
+  silent truncation that still matches size).
+- **Run:** `python verify_wan_integrity.py` (uses the egox env; hashing ~90 GB takes a few min).
+  Exit 0 = intact; exit 1 = lists the bad/missing files. **Repair = re-run `hf download`** — it
+  re-fetches only the bad/missing files, not the whole 90 GB.
+- **Gotcha noted:** don't build a "wait for download then verify" watcher whose `pgrep -f
+  "hf download…"` pattern appears in *its own* command line — it self-matches and loops forever.
+  Match a more specific string or use the harness background-task notification instead.
+
 ## 2. Ego-prior preprocessing models
 
 **Version 1 — shi3z standalone** ([EgoX-shi3z/generate_ego_prior.py](EgoX-shi3z/generate_ego_prior.py)),
@@ -290,6 +311,37 @@ Why the alternatives were rejected:
 2. **Backbone smoke-test** — QLoRA train on those few clips; confirm fit + loss drop; get real
    memory numbers (decides final training resolution).
 3. **Scale** data + train.
+
+#### Stage 0 readiness check — VERIFIED 2026-06-22 (it really is runnable with NO data prep)
+
+Stage 0 = "quantized inference of the released model" is **our invented validation step** (no
+equivalent in the paper's Stage A/B architecture — see [architecture.md](architecture.md)). The
+worry "doesn't inference still need a rendered ego-prior?" is answered: **the repo ships
+pre-rendered examples**, and `infer.py` *loads* the prior — it does not render it.
+
+- `infer.py` reads `meta['ego_prior_path']` ([infer.py:43](EgoX/infer.py#L43)) from a
+  `--meta_data_file`; it consumes a **pre-rendered** `ego_Prior.mp4`, never generates one. So
+  Stage A / ViPE / the renderer are **not** needed for Stage 0.
+- Shipped example data (no download, no preprocessing):
+  - `EgoX/example/egoexo4D/` — `meta.json` + 3 clips (basketball, dance, cooking); each has
+    `exo.mp4`, `ego_GT.mp4` (for comparison), and pre-rendered `ego_Prior.mp4`.
+  - `EgoX/example/in_the_wild/` — `meta.json` + 4 clips (tabletennis, ironman, hulk, joker);
+    each has `exo.mp4` + `ego_Prior.mp4`.
+
+**All four Stage 0 inputs present:**
+
+| Need | Status |
+|---|---|
+| Env (cu128, bnb 0.49.2, diffusers 0.34, peft) | ✅ built + verified |
+| Wan base (90 GB) | ✅ downloaded + SHA256-verified (see §1 integrity) |
+| EgoX LoRA | ✅ `/media/skr/SeagateHub1/egox_checkpoints/EgoX/pytorch_lora_weights.safetensors` |
+| Example inputs (exo + pre-rendered ego_prior + meta) | ✅ `EgoX/example/` |
+
+**The only Stage-0 work is a code change to `infer.py`:** stock `infer.py` loads the 14B
+transformer in **bf16 (~28 GB) → won't fit 24 GB**. Add the NF4 `BitsAndBytesConfig` load.
+**fuse_lora caveat** (from §"Off-the-shelf pre-quantized" above): a bf16 LoRA cannot be cleanly
+`fuse_lora`'d into already-quantized weights → either run the LoRA **unfused as a PEFT adapter**,
+or load bf16 → `fuse_lora` → **then** quantize the fused model.
 
 ---
 
