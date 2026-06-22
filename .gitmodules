@@ -1,6 +1,7 @@
 [submodule "EgoX"]
 	path = EgoX
-	url = https://github.com/DAVIAN-Robotics/EgoX.git
+	url = https://github.com/skr3178/EgoX-DAVIAN.git
+	branch = stage1-12gb
 [submodule "EgoX-shi3z"]
 	path = EgoX-shi3z
 	url = https://github.com/shi3z/EgoX.git
