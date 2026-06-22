@@ -15,3 +15,13 @@ checkpoints/
 
 # local tooling
 .gdown-venv/
+
+# Blackwell/local-only findings + plans (kept in-tree, never pushed)
+STAGE1_FINDINGS.md
+STAGEB_FINDINGS.md
+QLORA_TRAINING_PLAN.md
+
+# 24GB repro: logs + generated outputs (keep code/docs only)
+*.log
+wan_smoketest/outputs/
+**/__pycache__/

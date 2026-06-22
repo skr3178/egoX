@@ -83,6 +83,31 @@ How to re-verify any HF snapshot (script: [verify_wan_integrity.py](verify_wan_i
   "hf download…"` pattern appears in *its own* command line — it self-matches and loops forever.
   Match a more specific string or use the harness background-task notification instead.
 
+### Pipeline component roster — from `model_index.json` (VERIFIED 2026-06-22)
+
+The snapshot is a `WanImageToVideoPipeline` with **7 components**. Note: "encoder/decoder" are NOT
+separate models — they are the two halves of the single **VAE**.
+
+| # | Component | Class (authoritative) | Weights? | Size | Stage B step |
+|---|---|---|---|---|---|
+| 1 | `transformer` | `WanTransformer3DModel` (→ EgoX `_GGA`) | ✅ | 65.6 GB | step 5 (DiT) |
+| 2 | `vae` | `AutoencoderKLWan` (encoder **53.6 M** + decoder **73.3 M** = 126.9 M) | ✅ | 0.51 GB | steps 1 (enc) & 7 (dec) |
+| 3 | `text_encoder` | `UMT5EncoderModel` (UMT5-XXL) | ✅ | 22.7 GB | step 3 (text) |
+| 4 | `image_encoder` | `CLIPVisionModelWithProjection` (CLIP-ViT-H) | ✅ | 1.26 GB | step 3 (image) |
+| 5 | `tokenizer` | `T5TokenizerFast` | ❌ vocab only | tiny | feeds #3 |
+| 6 | `image_processor` | `CLIPImageProcessor` | ❌ config only | none | feeds #4 |
+| 7 | `scheduler` | `UniPCMultistepScheduler` | ❌ algorithm only | none | step 6 |
+
+- **Only #1–#4 have weights** (the 90 GB). #5–#7 are config/algorithm only.
+- **VAE internals** (`config.json`): z_dim=16, base_dim=96, dim_mult=[1,2,4,4] → ÷8 spatial;
+  `temperal_downsample=[F,T,T]` → ÷4 temporal (49 frames → 13 latent); no attention
+  (`attn_scales=[]`); submodules `encoder / quant_conv / post_quant_conv / decoder`; per-channel
+  `latents_mean[16]` + `latents_std[16]` baked in (used by `encode_video`:
+  `(sample − mean) × (1/std)`).
+- ⚠️ **Scheduler swap:** snapshot ships `UniPCMultistepScheduler`, but **EgoX replaces it with
+  `FlowMatchEulerDiscreteScheduler`** at runtime (its loss is defined against flow-matching) — the
+  stock scheduler is NOT what the repro uses.
+
 ## 2. Ego-prior preprocessing models
 
 **Version 1 — shi3z standalone** ([EgoX-shi3z/generate_ego_prior.py](EgoX-shi3z/generate_ego_prior.py)),
@@ -166,10 +191,10 @@ transformer in-framework:
 
 | Technique | 28 GB transformer → | Note |
 |---|---|---|
-| bitsandbytes 4-bit (QLoRA-style) | ~7–9 GB | some quality loss |
+| bitsandbytes 4-bit (QLoRA-style) | ~7–9 GB | some quality loss; **verified working** (see smoke test below) |
 | optimum-quanto fp8 | ~14 GB | minimal loss, needs fp8 kernels |
-| + `enable_model_cpu_offload` (encoders) | streams GPU↔CPU | needs 64 GB+ RAM |
-| + VAE tiling | cuts decode spike | nearly free |
+| `enable_model_cpu_offload` | — | ⚠️ **incompatible with bnb-quantized transformers** (bnb modules can't `.to(cpu)`) — verified; only the transformer + largest other component must co-fit |
+| VAE tiling | cuts decode spike | nearly free |
 
 This preserves the released EgoX weights (no retraining) and runs the real model on 24 GB —
 slow, but faithful. See also the smaller-backbone retrain options in [dataset.md](dataset.md) /
@@ -224,6 +249,47 @@ sampling regime (4-step, no CFG, custom scheduler). EgoX's GGA bias + width-conc
 trained for the full multi-step sampler — stacking works mechanically but quality is
 **unvalidated**, and you'd also swap the scheduler/`guidance_scale` in infer.py.
 
+## Stage 0 smoke test — STOCK Wan2.1-I2V on the 24 GB Blackwell — VERIFIED 2026-06-22
+
+Ran the **downloaded** `Wan2.1-I2V-14B-480P-Diffusers` snapshot through diffusers
+`WanImageToVideoPipeline` (plain image→video, NO EgoX conditioning) on the official
+`examples/i2v_input.JPG` (cat on a surfboard), 544×720, 33 frames, 30 steps. Script +
+outputs: [wan_smoketest/](wan_smoketest/) (`run_smoketest.py`, `outputs/*.mp4`).
+Env: diffusers 0.34.0, transformers 4.49.0, torch 2.10.0+cu128, bitsandbytes 0.49.2,
+RTX PRO 4000 Blackwell (sm_121). **Run with `PYTHONNOUSERSITE=1`** — `~/.local` has a
+conflicting transformers that breaks the import otherwise.
+
+| Mode | Result | Peak VRAM | Time | Why |
+|---|---|---|---|---|
+| **full bf16 + `enable_sequential_cpu_offload`** | ✅ **valid, lossless** | **4.2 GB** | 592 s (~9.9 min) | per-submodule streaming; the faithful path |
+| **nf4 (bnb 4-bit) + model offload** | ✅ **valid, coherent video** | **11.6 GB** | 466 s (~7.8 min) | fits with headroom; output clean |
+| int8 (bnb 8-bit) + model offload | ❌ OOM | ~23 GB | early | 14 GB transformer + 11 GB T5 co-resident (see below) |
+| full bf16 + **model** offload | ❌ OOM | ~23 GB | ~2 min | 28 GB transformer doesn't fit 24 GB; accelerate OOMs onloading the whole thing |
+
+Frame-level check (full-bf16 vs nf4, same seed): both photorealistic and temporally
+coherent, no nf4 artifacting; they diverge only in fine detail because quantization
+perturbs the denoising trajectory. Comparison images: `wan_smoketest/outputs/cmp_frame*.png`.
+
+**Verified findings (these correct earlier assumptions in this doc):**
+1. **4-bit NF4 is the validated 24 GB path** — runs end-to-end in 11.6 GB, output is a
+   clean coherent cat video. This empirically confirms the [DECISION](#decision-2026-06-22-wan21-i2v-14b--4-bit-qlora) below.
+2. **`enable_model_cpu_offload` cannot swap a bnb-quantized transformer** — bitsandbytes
+   modules raise *"moving it to cpu via .to() is not supported"*. So the quantized
+   transformer stays resident and you only fit if `transformer + largest other component
+   (T5 ≈ 11 GB) ≤ 24 GB`. nf4 (~8 GB)+T5 fits; **int8 (~14 GB)+T5 ≈ 25 GB OOMs.** To use
+   int8 you must offload T5 separately (precompute prompt embeds, free T5) — not just
+   call model-cpu-offload.
+3. **Full bf16 does NOT fit with model-cpu-offload, but DOES with `enable_sequential_cpu_offload`** —
+   model-offload OOMs onloading the whole 28 GB transformer; sequential (per-submodule) offload
+   runs it **lossless in 4.2 GB peak**, 9.9 min. Surprisingly that's *less* VRAM than nf4 (which
+   keeps the quantized transformer resident at 11.6 GB), just ~27% slower. So the two viable
+   24 GB paths: **nf4** (faster, tiny quality cost) vs **full-sequential** (lossless, near-zero VRAM).
+4. **diffusers #11006 (4-bit garbage output) does NOT reproduce** on this stack — nf4 frames
+   are clean. Loading the image encoder as `CLIPVisionModel` (not `…WithProjection`) avoids the
+   warning flagged in that issue.
+5. nf4 step time ≈ 14.6 s/step here is **bnb 4-bit dequant overhead**, not CPU streaming
+   (transformer is resident at 11.6 GB).
+
 ## Faithful 24 GB path with ZERO quality loss: block / CPU offload
 
 Source: [Wan-Video/Wan2.1 issue #241](https://github.com/Wan-Video/Wan2.1/issues/241).
@@ -260,6 +326,64 @@ hooks don't interfere — works at native precision.
 **Sweet spot:** fp8 transformer + `enable_model_cpu_offload` for the text/image encoders —
 keeps the quantized transformer resident, offloads only the encoders. Faithful-ish, not
 painfully slow.
+
+## Section-by-section EgoX inference test (real infer.py) — VERIFIED 2026-06-22
+
+Drove the **actual** `EgoX/infer.py` on example take 0 (`cmu_soccer06_6_877_925`) with the
+released rank-256 LoRA, nf4 transformer, `enable_model_cpu_offload`, on the 24 GB Blackwell.
+Test harnesses + logs: `EgoX/test_gga_geometry.py`, `EgoX/test_section2_load.py`,
+`EgoX/egox_e2e_*.log`. Status of the 7 inference sections:
+
+| # | Section | code | Status |
+|---|---|---|---|
+| 1 | Metadata load (paths/cameras) | infer.py:27-54 | ✅ all paths resolve |
+| 2 | Model + LoRA load/fuse | infer.py:56-82 | ✅ `_GGA` loads (in_channels=36); **LoRA UNFUSED** (can't fuse into nf4) |
+| 3 | GGA geometry (Aria undistort → rays → attn_maps) | infer.py:94-236 | ✅ CPU, clean shapes, no NaN |
+| 4 | Video load + width-concat (=1232×448) | wan.py:41-72 | ✅ matches paper |
+| 5 | VAE encode + 36-ch assembly | sft_trainer.py:~480 | ✅ after `_execution_device` fix |
+| — | image conditioning (CLIP) | sft_trainer.py:~282 | ✅ after `clamp(0,1)` fix |
+| 6 | **GGA denoising loop** | custom_transformer.py:639-676 | ❌ **OOM ~1 GB over 24 GB** (the paper's core mechanism) |
+| 7 | Decode + export | sft_trainer.py / wan.py | ⛔ not reached with GGA |
+
+**GGA-OFF control:** with `--use_GGA` off the same pipeline denoises fine at **~18 GB**
+(45 s/step, 50 steps) — proving the *plumbing* works end-to-end, but **GGA off reproduces
+none of the paper's contribution**, so it's only a harness check.
+
+### Root cause of the Section-6 OOM (the GGA memory wall)
+
+`custom_transformer.py:639` builds the cos-similarity attention bias as an **N×N float32**
+tensor, `N = 28028` tokens (49f × 1232×448 width-concat after patchify):
+
+```
+28028² × 4 B  ≈ 3.14 GB  (buffer)
+ + `mask = cos_sim > 0` bool        ≈ 0.78 GB
+ + `cos_sim[mask] *= factor` temp   ≈ up to ~1.5 GB
+```
+
+With the nf4 transformer (~8 GB) resident, this peaks ~22.5 GB and OOMs on the next ~1 GB
+alloc (`expandable_segments:True` clears fragmentation but not the hard ceiling). **This
+empirically confirms the activation-wall prediction — even at 4-bit weights, the paper's
+full-res GGA inference exceeds 24 GB.** A bf16 cos_sim buffer would halve it (~1.6 GB) and
+likely fit, but that perturbs GGA numerics, so it is **intentionally left float32** (faithful);
+see the NOTE at `custom_transformer.py:639`.
+
+### Code changes required to get this far (all annotated in-source)
+
+1. `infer.py` — `EGOX_QUANT=nf4` (BitsAndBytesConfig 4-bit) + run LoRA **unfused** + `EGOX_OFFLOAD`
+   / `EGOX_LOWVRAM` env switches for offload mode. **Faithfulness:** weights/method unchanged;
+   quantization is the only approximation.
+2. `sft_trainer.py:199` — `vae.device` → `self._execution_device`. **Numerically identical**;
+   only fixes device placement under `enable_model_cpu_offload` (vae.device reports cpu before
+   its forward hook fires).
+3. `sft_trainer.py:295` — `clamp(0,1)` on the decoded CLIP-conditioning frame. Only affects
+   out-of-range pixels that **nf4 reconstruction** produces and CLIP's processor rejects.
+
+### To actually run GGA-on (reproduce the contribution) on 24 GB
+
+Reclaim ~1-2 GB without altering GGA numerics: e.g. `image_encoder` in bf16, free cache
+between encode and denoise, or run GGA at reduced resolution/frames — but the GGA geometry
+dims are hard-coded to 49f/1232×448 (`infer.py:103`, 205), so that's not a one-liner. The
+paper trained/ran on 8×H200 (140 GB), where this matrix is trivial.
 
 ## Status of this fact in upstream docs
 

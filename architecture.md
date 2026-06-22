@@ -84,6 +84,66 @@ Hard-coded in [infer.py:103](EgoX/infer.py#L103) (`C,F,H,W = 16,13,56,154`) and
 [sft_trainer.py:884](EgoX/core/finetune/models/wan_i2v/sft_trainer.py#L884)
 (`exo_width, ego_width = 784, 448`).
 
+### Stage B — step-by-step (data flow)
+
+```
+                 STAGE B  —  EgoX generation (Wan2.1-I2V-14B + rank-256 LoRA)
+ ============================================================================================
+
+ INPUTS (from Stage A + dataset, per clip @ 49 frames):
+   exo.mp4 (448x784)   ego_Prior.mp4 (448x448)   ego_GT.mp4*   prompt   depth+intrinsics+cams
+        |                    |                       |            |              |
+        |                    |                       |            |              |   (*train only)
+        v                    v                       v            |              |
+ ┌─[1] VAE ENCODE (frozen) ──────────────────────────────────┐   |              |
+ |   exo      -> x0   clean exo latent      (16ch, 13x56x98)  |   |              |
+ |   ego_prior-> p0   ego-prior latent      (16ch, 13x56x56)  |   |              |
+ |   ego_GT   -> z0   then add noise -> zt  (16ch, noisy)     |   |              |
+ └────────────────────────────────────────────────────────────┘  |              |
+        |        |          |                                      |              |
+        v        v          v                                      |              |
+ ┌─[2] BUILD 36-CHANNEL DiT INPUT ──────────────────────────────┐ |              |
+ |  (W) width-concat:  [ x0 | zt ]  side-by-side  -> 13x56x154  | |              |
+ |  (C) channel-concat: 16 noise + 4 mask(m1|m0) + 16 cond(p0)  | |              |
+ |                      = 36 channels                           | |              |
+ └──────────────────────────────────────────────────────────────┘ |              |
+        |                                                           v              v
+        |                                          ┌─[3] CONDITION ENCODERS (frozen)──────────┐
+        |                                          |  prompt -> UMT5-XXL  -> text embeds       |
+        |                                          |           (precomputed+cached, then       |
+        |                                          |            text encoder UNLOADED)          |
+        |                                          |  exo frame -> CLIP-ViT-H -> image embeds   |
+        |                                          └────────────────────────────────────────────┘
+        |                                                           |
+        |                  ┌─[4] GGA GEOMETRY ─────────────────────┐|
+        |                  | depth + intrinsics(.npz) + cam/ego ext ||
+        |                  |  -> 3D ray dirs -> cos-sim bias (4x16x16)|
+        |                  └────────────────────────────────────────┘|
+        v                                                            v
+ ┌─[5] WanTransformer3DModel_GGA   (DiT block x 40)  [NF4 4-bit base + LoRA] ───────────────┐
+ |     per block:                                                                            |
+ |       5a. Geometry-Guided Self-Attention  <-- GGA bias   <== LoRA rank256 (TRAINABLE)     |
+ |       5b. Cross-Attention (text embeds + image embeds)                                    |
+ |       5c. Feed-Forward                                                                    |
+ └──────────────────────────────────────────────────────────────────────────────────────────┘
+        |
+        v
+ ┌─[6] FLOW-MATCH DENOISE (FlowMatchEulerDiscrete) ──────────────────────────────────────────┐
+ |   TRAIN:  predict velocity; MSE loss on the EGO HALF ONLY; 1 step/sample; backprop -> LoRA  |
+ |   INFER:  50-step loop; exo half re-frozen every step (noise_pred[...exo...]=0)             |
+ └────────────────────────────────────────────────────────────────────────────────────────────┘
+        |
+        v
+ ┌─[7] SPLIT + VAE DECODE (frozen) ──────────────┐
+ |   take ego half of latent -> VAE decode        |
+ |   -> EGO VIDEO  (448x448, 49 frames)           |
+ └──────────────────────────────────────────────────┘
+
+ Legend:  frozen = VAE, UMT5, CLIP, base DiT weights      TRAINABLE = LoRA only
+          NF4 4-bit = the quantization we validated (14B -> ~8.6 GB on the 24 GB GPU)
+          (W) width-concat   (C) channel-concat   |=side-by-side
+```
+
 ---
 
 ## 2. Models used, and **why**
