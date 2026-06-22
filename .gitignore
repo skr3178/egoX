@@ -1,5 +1,17 @@
 # Large dataset metadata — fetch from the Drive link in reference.md
 gdrive_files/
 
+# Ego-Exo4D metadata + linked raw data (large; fetch separately)
+egoexo4D/
+
+# Model weights / checkpoints (never commit)
+checkpoints/
+*.safetensors
+*.ckpt
+*.pth
+
+# Local build/run logs
+*.log
+
 # local tooling
 .gdown-venv/
