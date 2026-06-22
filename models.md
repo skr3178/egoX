@@ -334,20 +334,19 @@ released rank-256 LoRA, nf4 transformer, `enable_model_cpu_offload`, on the 24 G
 Test harnesses + logs: `EgoX/test_gga_geometry.py`, `EgoX/test_section2_load.py`,
 `EgoX/egox_e2e_*.log`. Status of the 7 inference sections:
 
+**5 of 7 confirmed; Section 6 (GGA denoising) is the wall — root cause pinned.**
+
 | # | Section | code | Status |
 |---|---|---|---|
 | 1 | Metadata load (paths/cameras) | infer.py:27-54 | ✅ all paths resolve |
-| 2 | Model + LoRA load/fuse | infer.py:56-82 | ✅ `_GGA` loads (in_channels=36); **LoRA UNFUSED** (can't fuse into nf4) |
+| 2 | Model + LoRA load/fuse (nf4, **unfused**) | infer.py:56-82 | ✅ `_GGA` loads (in_channels=36); can't fuse into 4-bit |
 | 3 | GGA geometry (Aria undistort → rays → attn_maps) | infer.py:94-236 | ✅ CPU, clean shapes, no NaN |
 | 4 | Video load + width-concat (=1232×448) | wan.py:41-72 | ✅ matches paper |
 | 5 | VAE encode + 36-ch assembly | sft_trainer.py:~480 | ✅ after `_execution_device` fix |
 | — | image conditioning (CLIP) | sft_trainer.py:~282 | ✅ after `clamp(0,1)` fix |
-| 6 | **GGA denoising loop** | custom_transformer.py:639-676 | ❌ **OOM ~1 GB over 24 GB** (the paper's core mechanism) |
-| 7 | Decode + export | sft_trainer.py / wan.py | ⛔ not reached with GGA |
-
-**GGA-OFF control:** with `--use_GGA` off the same pipeline denoises fine at **~18 GB**
-(45 s/step, 50 steps) — proving the *plumbing* works end-to-end, but **GGA off reproduces
-none of the paper's contribution**, so it's only a harness check.
+| 6 | **GGA denoising loop** | custom_transformer.py:639 (alloc) / :676 (forward) | ❌ **OOM ~1 GB over 24 GB** — float32 28028² cos-sim bias (the paper's core mechanism) |
+| 6′ | denoising **GGA-off** (control) | — | ✅ runs ~18 GB, 45 s/step — but reproduces *none* of the contribution; harness check only |
+| 7 | Decode + export | sft_trainer.py / wan.py | ⛔ **unconfirmed** — not reached with GGA; the GGA-off run that would reach it was killed before decode |
 
 ### Root cause of the Section-6 OOM (the GGA memory wall)
 
