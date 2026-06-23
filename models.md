@@ -334,7 +334,8 @@ released rank-256 LoRA, nf4 transformer, `enable_model_cpu_offload`, on the 24 G
 Test harnesses + logs: `EgoX/test_gga_geometry.py`, `EgoX/test_section2_load.py`,
 `EgoX/egox_e2e_*.log`. Status of the 7 inference sections:
 
-**5 of 7 confirmed; Section 6 (GGA denoising) is the wall — root cause pinned.**
+**ALL 7 confirmed — full GGA-on EgoX inference runs end-to-end on a single 24 GB card** (after
+faithful memory fixes; the GGA cos-sim stays float32). Updated 2026-06-23.
 
 | # | Section | code | Status |
 |---|---|---|---|
@@ -344,45 +345,83 @@ Test harnesses + logs: `EgoX/test_gga_geometry.py`, `EgoX/test_section2_load.py`
 | 4 | Video load + width-concat (=1232×448) | wan.py:41-72 | ✅ matches paper |
 | 5 | VAE encode + 36-ch assembly | sft_trainer.py:~480 | ✅ after `_execution_device` fix |
 | — | image conditioning (CLIP) | sft_trainer.py:~282 | ✅ after `clamp(0,1)` fix |
-| 6 | **GGA denoising loop** | custom_transformer.py:639 (alloc) / :676 (forward) | ❌ **OOM ~1 GB over 24 GB** — float32 28028² cos-sim bias (the paper's core mechanism) |
-| 6′ | denoising **GGA-off** (control) | — | ✅ runs ~18 GB, 45 s/step — but reproduces *none* of the contribution; harness check only |
-| 7 | Decode + export | sft_trainer.py / wan.py | ⛔ **unconfirmed** — not reached with GGA; the GGA-off run that would reach it was killed before decode |
+| 6 | **GGA denoising loop** | custom_transformer.py | ✅ **runs at 22.3 GB, 56.6 s/step, 50/50 in 47:12** (after the 3 mem fixes below) |
+| 6′ | denoising **GGA-off** (control) | — | ✅ ~18 GB, 45 s/step — plumbing check; reproduces *none* of the contribution |
+| 7 | Decode + export | sft_trainer.py / wan.py | ✅ **`generated/egoexo4D_take0/gga_generated_1232x448.mp4`** — qualitatively close to ego-GT |
 
-### Root cause of the Section-6 OOM (the GGA memory wall)
+### The GGA memory wall — and how it was closed *faithfully*
 
-`custom_transformer.py:639` builds the cos-similarity attention bias as an **N×N float32**
-tensor, `N = 28028` tokens (49f × 1232×448 width-concat after patchify):
+The bottleneck was the **N×N cos-similarity bias**, `N = 28028` tokens (49f × 1232×448 after
+patchify). The buffer itself is **float32 → 28028² × 4 B ≈ 3.14 GB** (kept float32 = faithful).
+The OOM (~1 GB over 24 GB, at the masked-scaling line) came from **transient copies** of that
+matrix, which can be removed without changing any value. Three faithful fixes in
+`custom_transformer.py` (all annotated in-source):
+
+1. **In-place clamp** — `torch.clamp(cos_sim,…)` → `cos_sim.clamp_(…)`. Removed one fresh ~3.1 GB copy.
+2. **Chunked in-place positive-scaling** — replaced `mask=cos_sim>0; cos_sim[mask]*=f` (full-matrix
+   bool + gather/scatter, ~3-4 GB spike — the actual OOM site) with 2048-row in-place chunks.
+3. **Precompute the log-bias once** — `log(cos_sim+1+1e-6)` was rebuilt (~3 copies) in *every* one
+   of the 40 blocks each step; now done once, in-place, before the block loop. Saved ~6 GB of
+   per-block peak.
+
+All three are numerically identical (same float32 values) — they delete redundant temporaries,
+not information. Result: peak 22.3 GB, GGA-on fits and the full 50-step run completes. **This is
+the run that actually reproduces the paper's contribution on 24 GB.** (A bf16 cos_sim would also
+fit but changes numerics — intentionally NOT done; see NOTE at the cos_sim alloc.)
+
+### All code changes (faithful; annotated in-source)
+
+1. `infer.py` — `EGOX_QUANT=nf4` (BitsAndBytesConfig 4-bit) + LoRA **unfused** + `EGOX_OFFLOAD` /
+   `EGOX_LOWVRAM` offload switches. Weights/method unchanged; quantization is the only approximation.
+2. `sft_trainer.py:199` — `vae.device` → `self._execution_device`. Numerically identical; fixes
+   device skew under `enable_model_cpu_offload`.
+3. `sft_trainer.py:295` — `clamp(0,1)` on the decoded CLIP-conditioning frame (nf4 reconstruction
+   can exceed [0,1], which CLIP's processor rejects).
+4. `custom_transformer.py` — the 3 GGA-memory fixes above (in-place clamp, chunked scaling,
+   precomputed log-bias).
+
+### Run recipe (reproduce on 24 GB)
 
 ```
-28028² × 4 B  ≈ 3.14 GB  (buffer)
- + `mask = cos_sim > 0` bool        ≈ 0.78 GB
- + `cos_sim[mask] *= factor` temp   ≈ up to ~1.5 GB
+PYTHONNOUSERSITE=1 EGOX_QUANT=nf4 EGOX_OFFLOAD=model CUDA_VISIBLE_DEVICES=0 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python infer.py --meta_data_file ./example/egoexo4D/meta.json \
+  --model_path ./checkpoints/pretrained_model/Wan2.1-I2V-14B-480P-Diffusers \
+  --lora_path ./checkpoints/EgoX/pytorch_lora_weights.safetensors \
+  --lora_rank 256 --out ./results --seed 42 --use_GGA --cos_sim_scaling_factor 3.0 --idx 0
 ```
 
-With the nf4 transformer (~8 GB) resident, this peaks ~22.5 GB and OOMs on the next ~1 GB
-alloc (`expandable_segments:True` clears fragmentation but not the hard ceiling). **This
-empirically confirms the activation-wall prediction — even at 4-bit weights, the paper's
-full-res GGA inference exceeds 24 GB.** A bf16 cos_sim buffer would halve it (~1.6 GB) and
-likely fit, but that perturbs GGA numerics, so it is **intentionally left float32** (faithful);
-see the NOTE at `custom_transformer.py:639`.
+Caveats on the output: nf4 (not full bf16), n=1, qualitative only. For a quality verdict run the
+metrics (PSNR/SSIM/LPIPS/CLIP-I + object IoU) vs `ego_GT`, comparing the **right-448 ego half**
+of the 1232-wide output, frame-aligned.
 
-### Code changes required to get this far (all annotated in-source)
+### ⚠️ Don't confuse the two: "GGA on/off" vs the "cos-sim memory fixes"
 
-1. `infer.py` — `EGOX_QUANT=nf4` (BitsAndBytesConfig 4-bit) + run LoRA **unfused** + `EGOX_OFFLOAD`
-   / `EGOX_LOWVRAM` env switches for offload mode. **Faithfulness:** weights/method unchanged;
-   quantization is the only approximation.
-2. `sft_trainer.py:199` — `vae.device` → `self._execution_device`. **Numerically identical**;
-   only fixes device placement under `enable_model_cpu_offload` (vae.device reports cpu before
-   its forward hook fires).
-3. `sft_trainer.py:295` — `clamp(0,1)` on the decoded CLIP-conditioning frame. Only affects
-   out-of-range pixels that **nf4 reconstruction** produces and CLIP's processor rejects.
+These are **two independent things** and it's easy to mix them up:
 
-### To actually run GGA-on (reproduce the contribution) on 24 GB
+**Axis 1 — GGA on/off (`--use_GGA`): the METHOD. Changes the output.**
+- **ON** = the paper's actual contribution: the geometry (cos-similarity) bias is added to attention
+  so the ego view is geometrically aligned. → our finished run (`gga_ego_only_448.mp4`).
+- **OFF** = ablation / plumbing check: plain width-concat I2V, no geometry bias — "EgoX minus its
+  point." (Started as a control, **killed before it finished → no GGA-off video exists yet.**)
 
-Reclaim ~1-2 GB without altering GGA numerics: e.g. `image_encoder` in bf16, free cache
-between encode and denoise, or run GGA at reduced resolution/frames — but the GGA geometry
-dims are hard-coded to 49f/1232×448 (`infer.py:103`, 205), so that's not a one-liner. The
-paper trained/ran on 8×H200 (140 GB), where this matrix is trivial.
+**Axis 2 — the "cos" code edits: MEMORY ONLY. Does NOT change the output.**
+- They exist solely to make **GGA-ON fit in 24 GB**. GGA-on builds a huge N×N (28028²) cos-sim
+  matrix and then made redundant **copies** of it → OOM by ~1 GB.
+- The edits **delete the redundant copies** (in-place clamp, chunked scaling, precompute log-bias
+  once) — **numerically identical**, same values, just less peak memory. Not a "mode".
+- The **buffer itself stays float32** (~3.14 GB) — deliberately kept faithful.
+- The one change we **reverted** (would NOT be faithful): making the cos-sim buffer **bf16** — that
+  shrinks memory but changes the numbers, so we don't do it.
+
+| | GGA ON | GGA OFF |
+|---|---|---|
+| What it is | paper's method (geometry bias) | ablation / plumbing |
+| Output exists? | ✅ `gga_ego_only_448.mp4` | ❌ killed, never produced |
+| Memory fix needed? | ✅ the cos copy-removals let it fit @22.3 GB | no (lighter, ran @18 GB) |
+
+**One-liner:** GGA on/off decides *which method runs* (changes the video); the cos-sim edits are
+*memory housekeeping* that let GGA-**on** run at all on 24 GB **without changing its result**.
 
 ## Status of this fact in upstream docs
 
@@ -465,6 +504,91 @@ transformer in **bf16 (~28 GB) → won't fit 24 GB**. Add the NF4 `BitsAndBytesC
 **fuse_lora caveat** (from §"Off-the-shelf pre-quantized" above): a bf16 LoRA cannot be cleanly
 `fuse_lora`'d into already-quantized weights → either run the LoRA **unfused as a PEFT adapter**,
 or load bf16 → `fuse_lora` → **then** quantize the fused model.
+
+### Training time & resolution estimate (24 GB, cooking subset) — 2026-06-23
+
+Target: QLoRA-train small-scale EgoX on the cooking takes (**259 takes → 889 clips**),
+dataset pre-encoded up front (latents + prompt/image embeds + GGA geometry cached →
+encoders unloaded → only the transformer resident during training).
+
+**Do NOT extrapolate from the ~40-50 min inference run** — that is 50 *denoising* steps.
+**Training is 1 forward + 1 backward per clip**, not 50. The unit is per-clip, not per-50-steps.
+
+Anchored on the one hard measurement: **~57 s per GGA forward** (nf4, full res 49f/1232×448,
+this card — from the GGA inference run).
+
+| Step component | cost |
+|---|---|
+| 1 GGA forward (measured) | ~57 s |
+| + backward (~2× fwd) | ~115 s |
+| + gradient checkpointing (recompute fwd in bwd; needed to fit) | ×~1.3 |
+| **≈ one training step (one clip), full res** | **~3-4 min** |
+
+**Full paper resolution → ~50 h/epoch (~2 days), and almost certainly won't fit.** We barely
+fit GGA *inference* at 22.3 GB, and that **stores no activations**. Training must keep the
+backward graph (40 blocks × 28k tokens) + the 3.1 GB cos-sim + grads + optimizer states; even
+with QLoRA's tiny trainable params the **activation memory blows past 24 GB**. → **must reduce
+frames/resolution for training** (the activation wall, §"Known constraints").
+
+**Realistic path = reduce resolution → fits AND much faster.** Tokens scale with frames×H×W and
+GGA attention is O(N²), so halving frames *and* spatial ≈ 4× fewer tokens ≈ ~16× cheaper
+attention + far less memory:
+
+| Config | ~tokens | ~step | ~epoch (889 clips) |
+|---|---|---|---|
+| Full 49f / 1232×448 | 28k | ~3-4 min | ~50 h (likely OOM) |
+| **~25f / ~half-spatial** | ~7k | **~20-40 s** | **~5-10 h** |
+| ~13f / quarter area | ~3.5k | ~10-20 s | ~3-5 h |
+
+**One-time pre-encoding:** VAE-encode + T5/CLIP embeds + GGA geometry for 889 clips, cached
+once. At ~15-30 s/clip → **~4-7 h, one-time** (then encoders unload — frees VRAM for the
+transformer).
+
+**Bottom line:**
+- Full-res: ~2 days/epoch and probably won't fit → not the path.
+- **Reduced-res (the plan): ~5-10 h/epoch + ~5 h pre-encode → a few-epoch run ≈ 1-3 days.**
+- Biggest uncertainty = whether it fits + grad-checkpoint overhead. **Stage 2 training
+  smoke-test (10-20 real steps on a handful of clips)** replaces all of the above with a
+  measured per-step number + a confirmed fit *before* committing days. Treat these as estimates.
+
+#### What "49f" means (token driver = video, not depth)
+
+`49f / 1232×448` = a **49-frame video clip** at 1232×448. The **video** dims drive the token
+count, not the depth maps:
+- 49 frames → VAE temporal ÷4+1 → **13 latent frames**
+- 1232×448 → VAE spatial ÷8 → 154×56 → patchify ÷2 → ~77×28
+- tokens `N ≈ 13 × 77 × 28 ≈ 28k`
+
+Depth maps are also 49 frames (one per video frame) but they feed the **GGA geometry**
+(`attn_maps`), they do **not** set N. So "reduce 49f" = shorter/lower-res *video* clips; the
+depth/geometry just follows at the matching resolution.
+
+#### Biggest training wins, ranked
+
+1. **Reduce N (resolution + frames) — by far the biggest.** Everything scales with N and
+   **GGA attention is O(N²)**, so it's super-linear: halving frames *and* spatial → ~4× fewer
+   tokens → ~16× cheaper attention *and* the memory that decides if it fits. Spatial has the
+   most headroom (the width-concat already doubles W to 1232); frames (49→25→13) cut N linearly.
+2. **Pre-encoding / caching (already planned) — essential for *fit*.** Doesn't change the
+   per-step transformer cost, but unloads VAE/T5/CLIP so **only the transformer is resident** —
+   that headroom is what makes training fit. Big memory win, modest time win.
+3. **Smaller scope for the proof — linear total-time win.** Don't need all 889 clips × many
+   epochs. ~200 clips × 1-2 epochs is enough to show the LoRA learning (loss drop + qualitative
+   gain). Cheapest lever; cuts wall-clock proportionally.
+4. **Memory-efficient GGA attention — engineering win.** The same chunked/in-place/no-full-N×N
+   trick that fit *inference* (see `custom_transformer.py` notes), applied to the *training*
+   forward+backward, would let you fit higher res / bigger batch. More effort; attacks the wall directly.
+
+Lesser: `torch.compile` (uncertain w/ nf4+custom GGA), lower LoRA rank (256→128, small, deviates),
+bf16 cos-sim (halves the bias but changes numerics — faithfulness call). **Keep nf4** (small
+weight footprint leaves room for activations; fp8 would be worse for training).
+
+#### Pushing below ~5-10 h/epoch
+
+Stack #1 and #3: aggressive res (13f/quarter → ~3-5 h/epoch) + subset (200 of 889 → ~1/4) +
+1-2 epochs → a **proof-of-learning run in a few hours, not days**. **Catch:** lower res = lower
+quality + less faithful to the paper. So: reduce res to *prove the method trains on 24 GB*, then
+push resolution back up (with the memory-efficient attention) until you OOM.
 
 ---
 

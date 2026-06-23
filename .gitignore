@@ -23,3 +23,6 @@ wan_smoketest/outputs/
 
 # Blackwell local scratch: scripts, runs, render outputs (never pushed)
 local/
+
+# GGA/NF4 inference outputs (generated, not pushed)
+generated/
