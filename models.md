@@ -423,6 +423,34 @@ These are **two independent things** and it's easy to mix them up:
 **One-liner:** GGA on/off decides *which method runs* (changes the video); the cos-sim edits are
 *memory housekeeping* that let GGA-**on** run at all on 24 GB **without changing its result**.
 
+### GGA cost at inference (measured) + ablation
+
+Both runs: same take (`cmu_soccer06_6_877_925`), seed 42, full res 49f/1232×448, nf4 transformer,
+`enable_model_cpu_offload`, on the RTX PRO 4000 Blackwell.
+
+| | GGA-on | GGA-off | **GGA adds** |
+|---|---|---|---|
+| Peak VRAM | 22.3 GB | 18.3 GB | **+4.0 GB (+22%)** |
+| Step time | 56.6 s | 45.4 s | **+11.2 s (+25%)** |
+| 50-step run | 47 min | ~37 min | ~+10 min |
+
+The +4 GB is the float32 N×N cos-sim buffer (~3.1 GB) + temporaries; the +11 s/step is the
+cos-sim build **plus** the dense-mask attention blocking the fast fused/flash kernel (GGA-off
+falls back to fused SDPA). *(Training cost is larger and unmeasured — see "Training time &
+resolution estimate": GGA's overhead is paid in fwd **and** the grad-checkpoint recompute, and
+the N×N intermediates are retained for backward.)*
+
+**Ablation (qualitative, n=1):** generated ego-half at a mid-frame, GGA-on │ GGA-off │ ego-GT:
+
+![GGA on vs off vs GT](generated/egoexo4D_take0/ablation_GGAon_GGAoff_GT.png)
+
+GGA-on tracks the GT pose/viewpoint and hue more closely than GGA-off. **Caveats:** (1) the
+released LoRA was trained *with* GGA, so GGA-off here is a *mismatched* (bias-removed) run, not a
+clean "trained-without-GGA" ablation; (2) nf4 dominates color/quality; (3) single still, n=1. So
+this is **suggestive, not rigorous** — a real verdict needs per-frame PSNR/SSIM/LPIPS vs GT.
+Artifacts: `generated/egoexo4D_take0/{gga_ego_only_448.mp4, ego_GT.mp4, ablation_GGAon_GGAoff_GT.png}`,
+`generated/egoexo4D_take0_ggaoff/ggaoff_ego_only_448.mp4`.
+
 ## Status of this fact in upstream docs
 
 - **EgoX repo**: implicit in code (loads stock I2V transformer, builds 36-ch input) but
