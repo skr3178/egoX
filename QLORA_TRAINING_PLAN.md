@@ -89,6 +89,23 @@ setsid nohup bash -c 'PYTHONNOUSERSITE=1 HF_HUB_ENABLE_HF_TRANSFER=0 \
 - Phase A validated this resolution end-to-end (peak 22.8 GB / 24 GB).
 - **Never pre-resize files** — pass `--train_resolution 49x256x704`; loader downsamples + pre-encodes epoch 1.
 
+### Cache contents (verified) — what precompute writes per clip
+Inspected `cache/.../49x256x704/<clip>_exo_exo_ego_gt_prior.safetensors` etc. All present, no NaNs:
+
+| Cache file | Key | Shape | Meaning |
+|---|---|---|---|
+| **video_latent** | `encoded_exo_ego_gt_video` | (16, 13, 32, 88) bf16 | Wan VAE: 16 ch, 49→13 latent frames, 256/8=32 H, 704/8=88 W |
+| | `encoded_exo_ego_prior_video` | (16, 13, 32, 88) bf16 | exo+ego_prior concat, same shape |
+| **attn_maps** (GGA) | `attn_maps` | (13, 32, 88, 3) f32, [-1,1] | geometry cos-sim directions |
+| | `attn_masks` | (13, 32, 88, 3) f32, [0,1] | valid-region mask |
+| | `cam_rays` | (13, 32, 32, 3) f32 | ego rays (ego 256×256 → 32×32 latent) |
+| | `point_vecs` | (13, 13, 32, 56, 3) f32 | exo points (exo = 56 latent-W) |
+| **image_embeddings** | `image_embedding` | (257, 1280) f32 | CLIP-H: 256 patches+CLS, 1280 dim |
+| **prompt_embeddings** | `prompt_embedding` | (512, 4096) bf16 | UMT5: 512 seq, 4096 dim |
+
+- Width split: 88 latent-W = **56 (exo) + 32 (ego)** → concat ratio preserved; ego region (last 32 cols) matches the loss slice (`-ego_latent_width`).
+- **Cache key = clip name** (fixed `wan_dataset.py:182` from `[-4]`='vipe_results' which collided all clips onto one latent file).
+
 ---
 
 ## 3. After Stage-1 → QLoRA training
