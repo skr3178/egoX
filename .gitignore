@@ -25,3 +25,6 @@ QLORA_TRAINING_PLAN.md
 *.log
 wan_smoketest/outputs/
 **/__pycache__/
+
+# Blackwell local scratch: scripts, runs, render outputs (never pushed)
+local/
