@@ -121,6 +121,46 @@ Inspected `cache/.../49x256x704/<clip>_exo_exo_ego_gt_prior.safetensors` etc. Al
   (`sft_trainer.py:932,951,953`). Exo region is clean in-context conditioning, excluded from loss.
 - **Never `fuse_lora`** on the NF4 base (unfused adapter only).
 
+### Official EgoX defaults vs our 104-clip config (criticality)
+
+Official = `scripts/finetune.sh` + `core/finetune/schemas/args.py` argparse defaults (effective values;
+finetune.sh doesn't override the optimizer/LR block). LR=2e-5 confirmed by Phase A's `lr` ramp
+(2e-7@step1, 4e-6@step20 = 2e-5·step/100).
+
+Legend — **Matches?**: ✅ identical · ⚙️ value differs but achieves the same effect · ✗ diverges (reason).
+
+| Param | Official | Ours | Matches? | Critical? |
+|---|---|---|---|---|
+| GPUs | 4 | 1 (24 GB) | ✗ — only 1 GPU available | forced |
+| **Effective batch** | **4** (1×1×4) | **4** (1 × accum 4) | ✅ yes | 🔴 |
+| `gradient_accumulation_steps` | 1 | 4 | ⚙️ differs — recovers batch 4 on 1 GPU | 🔴 |
+| **LoRA rank / alpha** | 256 / 256 | 256 / 256 | ✅ yes | 🔴 |
+| **train_resolution** | 49×448×1232 | 49×256×704 | ✗ — reduced; GGA N²·4B buffer won't fit 24 GB | 🟠 forced |
+| **base precision** | bf16 (full) | NF4 4-bit (QLoRA) | ✗ — quantized to fit 14B in 24 GB | 🟠 forced |
+| **epochs** | 150 (~3510 clips) | 100 → 300 (104 clips) | ✗ — scaled to 104 clips (150 would overfit) | 🔴 |
+| learning_rate | 2e-5 | 2e-5 | ✅ yes (valid *because* batch = 4) | 🟢 |
+| optimizer | AdamW | AdamW | ✅ yes | 🟢 |
+| β1/β2 (β3), eps, weight_decay | 0.9/0.95 (0.98), 1e-8, 1e-4 | same | ✅ yes | 🟢 |
+| max_grad_norm | 1.0 | 1.0 | ✅ yes | 🟢 |
+| lr_scheduler | constant_with_warmup | constant_with_warmup | ✅ yes | 🟢 |
+| **lr_warmup_steps** | 100 | 30 | ✗ — intentional; early signal on small set (faithful = 100) | 🟡 |
+| gradient_checkpointing | True | True | ✅ yes | 🟢 |
+| target_modules | to_q,to_k,to_v,to_out.0 | same | ✅ yes | 🟢 |
+| checkpointing_steps | 250 | 100 | ✗ — operational only; more frequent resumable ckpts | minor |
+
+**Critical notes:**
+- **Effective batch 4 + LR 2e-5 are one coupled decision** — official LR was tuned for batch 4; we recover
+  batch 4 via grad_accum 4 (not a larger per-GPU micro-batch, which official never used), so 2e-5 stays valid.
+- **Don't copy 150 epochs** — that was over ~3510 clips. On 104 clips, 100 ep ≈ 2,600 steps, 300 ep ≈ 7,800.
+- **Forced divergences** (res 256×704, NF4) are unavoidable on 24 GB; everything else matches the paper.
+- **warmup 30** (vs 100) is a deliberate choice for an early loss signal on the small set; faithful = 100.
+
+**Chosen launch** (`scripts/finetune_cooking100.sh`, NOT yet run): rank/alpha 256, batch 1 × grad_accum 4,
+LR 2e-5, warmup 30, constant_with_warmup, AdamW(0.9,0.95) wd 1e-4 clip 1.0, bf16, NF4, 49×256×704,
+train_epochs 100, ckpt every 100 (limit 10), report_to tensorboard.
+**Wall-clock:** ~84 s/optimizer-step (grad_accum 4 × ~21 s/micro-step) → 100 ep ≈ **~60 h** (300 ep ≈ ~180 h);
+loss signal visible in ~30–60 min, first checkpoint ~2–3 h. Stoppable + resumable.
+
 ---
 
 ## 4. EgoX submodule code changes (local, uncommitted)
