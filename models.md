@@ -618,6 +618,47 @@ Stack #1 and #3: aggressive res (13f/quarter → ~3-5 h/epoch) + subset (200 of 
 quality + less faithful to the paper. So: reduce res to *prove the method trains on 24 GB*, then
 push resolution back up (with the memory-efficient attention) until you OOM.
 
+### LoRA rank — effective-rank analysis of the released adapter — VERIFIED 2026-06-23
+
+Instead of an expensive rank sweep, read the needed rank **out of the released rank-256 LoRA**:
+SVD each layer's update `ΔW = B·A` and see how many singular values carry the energy. Free,
+CPU-only (`CUDA_VISIBLE_DEVICES=""`, doesn't touch the GPU), seconds via the QR trick (nonzero
+σ of `B·A` = σ of a 256×256 matrix). 320 layers analyzed.
+
+**Effective rank (σ's needed to keep X% of each layer's update energy, cap 256):**
+
+| energy kept | median | mean | max (worst layer) |
+|---|---|---|---|
+| 90% | **9** | 21 | 102 |
+| 95% | **27** | 42 | 149 |
+| 99% | **120** | 112 | 222 |
+
+Singular values collapse fast (normalized: 1.0 → 0.14@8 → 0.056@32 → 0.021@128 → 0.009@255).
+**No layer saturates 256** — the top end carries <1% energy.
+
+**By module (median k90 / k95 / k99):**
+
+| module | k90/k95/k99 | reading |
+|---|---|---|
+| `attn1.to_v` (self-attn value) | 65 / 111 / 204 | **hungriest** — real high rank |
+| `attn1.to_q/k`, `to_out` | ~11 / ~40 / ~150 | moderate |
+| `attn2.*` (cross-attn / text) | 3–7 / 5–16 / 26–65 | **barely uses rank** |
+
+Self-attention (esp. the value projection) does the heavy lifting — expected for a spatial
+view-warping task; cross-attention (text conditioning) is nearly rank-trivial.
+
+**Verdict:**
+- **rank 128** keeps ~99% of the median layer's update + ≥95% of essentially all layers, while
+  **halving** the LoRA (839 M → ~419 M) and its optimizer state. Evidence-backed sweet spot.
+- **rank 64** = aggressive (90–95% for most, but clips the `attn1.to_v` family ~111) — probe only.
+- **rank 256 (faithful/paper)** = safe but ~half the capacity carries <1% energy → over-provisioned.
+- Bonus: our **lower-res / small-data** regime needs *less* capacity, making 128 conservative.
+
+**Caveats:** (1) truncation ≠ retraining — this proves the *trained* update lives in ~128 dims;
+training fresh at 128 should reach a comparable solution but isn't guaranteed identical (strong
+evidence, not proof). (2) energy (σ²) ≈ but ≠ perceptual quality — tiny directions can matter.
+Faithful repro keeps 256; for memory/speed, **128 is the justified reduction**.
+
 ---
 
 # Alternatives — decision summary (24 GB GPU)
