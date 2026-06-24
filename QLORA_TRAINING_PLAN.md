@@ -77,6 +77,39 @@ setsid nohup bash -c 'PYTHONNOUSERSITE=1 HF_HUB_ENABLE_HF_TRANSFER=0 \
 `previews/vits5_grid.png` (5× ego_GT|ego_Prior), `previews/vits5/<clip>_cmp.mp4` (exo|ego_GT|ego_Prior),
 `previews/REF_cooking57_mid.png` (authors' reference — confirms sparse+black ego_Prior is normal).
 
+### Ego-prior quality — what signal it carries, and why it's sparse (analyzed 2026-06-24)
+**Renderer:** `EgoX/EgoX-EgoPriorRenderer/scripts/render_vipe_pointcloud.py` — a **point-cloud splat**
+(pytorch3d `FishEyeCameras`, `--point_size 5.0`) of a ViPE-depth point cloud, reprojected from the exo
+view into the ego Aria-fisheye pose. **Depth model = ViPE vitS** (`lyra_svda` = MoGe-2 + VDA-Small).
+There is **no mesh/surface/inpainting** — discrete points → black holes between them by construction.
+
+**Why the prior looks poor (5 compounding reasons):**
+1. **Background-only** (`build_background_pointcloud`, `static_mask = instance_mask == 0`): the renderer
+   **drops all dynamic foreground** (hands, the person, manipulated objects). For a hand-object ego task
+   the most important content — hands at the cutting board — is *deliberately excluded* from the prior.
+   (Authors' design, not ours.)
+2. **Subsample + splat** (`spatial_subsample=2`): keeps ~1/4 of pixels, rendered as discrete points → gaps.
+3. **vitS depth** (our speed choice): noisier/lower-fidelity than vitL → more points fail
+   `reliable_depth_mask_range` and get dropped; positions jitter.
+4. **exo→ego reprojection occlusion:** points come from far third-person exo cameras reprojected into the
+   close first-person ego; the large viewpoint gap means much of the ego FOV was never seen by exo → holes.
+5. **SLAM-map path unused:** the renderer *prioritizes an Aria MPS semi-dense SLAM map if present*, else
+   falls back to this sparse depth method. We have no MPS points → always on the sparse fallback. The
+   paper's priors were likely **denser** (MPS semi-dense static cloud).
+
+**Is the signal adequate?** The prior is a **coarse geometric scaffold by design** — sparse+black matches
+the authors' reference (`previews/REF_cooking57_mid.png`), so it is *normal*, not a bug. The **dominant**
+conditioning signal is the **exo in-context video** the transformer attends to (the whole IC-LoRA point);
+the prior just hints scene geometry/color, and the model hallucinates dynamic detail. **But** our prior is
+poorer than the paper's (vitS + no-SLAM + background-only) → it carries little signal for *foreground/hands*,
+which plausibly limits ceiling on hand-object fidelity. ckpt-100's predicted ego (coarse warm field where
+GT has food + gray blob where hands are) is consistent with "tracking the coarse prior, undertrained for detail."
+
+**Levers if priors prove limiting (cost ↑):** (a) vitL depth; (b) feed Aria MPS semi-dense SLAM points
+(renderer already prefers them → much denser); (c) larger `point_size` / no subsample / point dilation;
+(d) keep foreground (drop the `instance==0` filter) so hands appear in the prior. Defer until a *mature*
+checkpoint shows the prior — not training maturity — is the bottleneck.
+
 ---
 
 ## 2. Resolution — handled at TRAIN time (no prep step)
@@ -178,6 +211,47 @@ Keep: `online_calibration.jsonl` (ego fisheye distortion — needed for render),
 Discard (~43 GB): `open_loop_trajectory.csv`, `closed_loop_trajectory.csv`
 — ego pose already baked into meta_train `ego_extrinsics (49,3,4)`; render reads poses from meta, not the CSVs.
 (Holds because clips use meta_train's exact frame ranges.)
+
+---
+
+## 5a. RESOLVED (2026-06-24): inference GGA mismatch was REAL, not compensating — now FIXED
+Found in the 2026-06-23 audit; **numerically verified + fixed 2026-06-24.** The Geometry-Guided-Attention
+(cam_rays / point_vecs) was computed **differently** at inference vs at training-cache time — 4 differences:
+
+| step | training-cache (`core/finetune/datasets/wan_dataset.py`) | OLD inference (`infer_nf4.py` / authors' `infer.py`) |
+|---|---|---|
+| ray unprojection | pinhole `inv_intrinsics @ pixel_coords` | `cv2.undistortPoints` (Aria fisheye coeffs) |
+| ego rotation | `cam_rays @ R.transpose(-1,-2)` | `cam_rays @ R` (no transpose) |
+| 90° rotation | matrix `[[0,1,0],[-1,0,0],[0,0,1]]` | `torch.rot90(k=-1, dims=[1,2])` |
+| point_map | no crop (interpolate full) | center-crop to (H, W-H) |
+
+**Verdict: NOT compensating — they diverge badly.** Numerical check (`local/gga_check.py`, one val clip,
+sanity: training-replica ≡ cache cos=1.0000):
+
+| GGA component | OLD inference vs training | after fix |
+|---|---|---|
+| cam_rays (ego) | cos **0.28** (16% of rays inverted, cos<0) | **1.0000** |
+| point_vecs (exo) | cos **0.33** (26% inverted) | **1.0000** |
+
+So OLD inference fed the LoRA **near-orthogonal (out-of-distribution) conditioning** → artifacts. The
+LoRA learned the `wan_dataset.py` convention, so inference MUST match *that*.
+
+**Resolution sensitivity (why it surfaced now):** the author defaults were ~OK at the paper's 448×1232
+(cam_rays cos 0.79; point_vecs crop ≈ no-op so ~1.0) and our **resolution reduction to 176×704** is what
+broke them (0.28 / 0.33). The center-crop crops to `(PIX_H, PIX_W-PIX_H)` pixels — at 448 that ≈ the
+depth-map size (no-op), at 176 it destroys most exo geometry. Training never crops & always uses
+pinhole+Rᵀ+matrix, so aligning inference to training is correct at **both** resolutions.
+
+**Fix applied to `EgoX/infer_nf4.py`** (inference-only; no training/cache impact): (1) cam_rays →
+pinhole + Rᵀ (matches `wan_dataset.py:329-340`); (2) 90° → vector matrix-rot, not `rot90`
+(`:407`); (3) point_vecs → drop the center-crop (`:384`). Verified the corrected inference reproduces
+cached GGA at cos=1.0000. Diagnostic kept at `local/gga_check.py`; re-run script
+`local/run_infer_ckpt100_ggafix.sh`.
+
+**ckpt-100 re-eval after fix:** the exo half decodes razor-sharp (proves mask/decode/crop sound); only
+the rightmost 176×176 **ego** is transformer-generated and it is still a degenerate low-frequency blob —
+attributable to undertraining (~6 epochs), NOT the pipeline. Eval format going forward: GT | Prior |
+Predicted, **ego-cropped** (the output mp4 is a 704×176 `[exo|ego]` strip; crop `=176:176:528:0`).
 
 ---
 
