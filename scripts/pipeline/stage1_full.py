@@ -60,8 +60,34 @@ def main():
           f"({len(calib_takes)} takes have calib){' [generic allowed]' if a.allow_generic else ' [calib-only]'} ===", flush=True)
 
     env = {**os.environ, "PYTHONNOUSERSITE": "1", "HF_HUB_ENABLE_HF_TRANSFER": "0"}
-    ok = skip = fail = 0; failed = []
+
+    # --- Skip corrupt takes: a take whose ego_prior renders BLACK (point cloud misses the ego FOV)
+    # yields no conditioning signal; generating its other windows wastes compute. Shared across shards
+    # via bad_takes.txt (pre-seeded with known whole-take failures, grown on the fly).
+    import cv2, numpy as np
+    BAD_TAKES_FILE = "/media/skr/storage/paper_reproduction/egoX/generated/bad_takes.txt"
+    def load_bad_takes():
+        if not os.path.exists(BAD_TAKES_FILE): return set()
+        return {l.strip() for l in open(BAD_TAKES_FILE) if l.strip() and not l.startswith("#")}
+    def mark_bad_take(t):
+        if t in load_bad_takes(): return
+        with open(BAD_TAKES_FILE, "a") as f:
+            f.write(t + "\n")
+    def prior_cov(c):
+        p = f"{OUT}/videos/{c}/ego_Prior.mp4"
+        if not os.path.exists(p): return 0.0
+        cap = cv2.VideoCapture(p); fr = []
+        while True:
+            okk, frm = cap.read()
+            if not okk: break
+            fr.append(float((frm.max(axis=2) > 12).mean()))
+        cap.release(); return float(np.mean(fr)) if fr else 0.0
+
+    ok = skip = fail = skipbad = 0; failed = []
     for i, c in enumerate(mine):
+        t = re.sub(r"_\d+_\d+$", "", c)
+        if t in load_bad_takes():               # corrupt take -> don't waste time rendering it
+            skipbad += 1; continue
         if clip_done(c, a.skip_render):
             skip += 1; continue
         print(f"\n[{i+1}/{len(mine)}] {c}", flush=True)
@@ -69,11 +95,16 @@ def main():
         r = subprocess.run(cmd, env=env)
         if r.returncode == 0:
             ok += 1
+            if not a.skip_render:
+                cov = prior_cov(c)
+                if cov < 0.01:                    # BLACK prior -> mark take corrupt, skip its other windows
+                    mark_bad_take(t)
+                    print(f"  !! BLACK ego_prior (cov={cov:.2%}) -> take '{t}' corrupt; skipping its remaining windows", flush=True)
         else:
             fail += 1; failed.append(c); print(f"  !! FAILED {c} (rc={r.returncode})", flush=True)
         if (i + 1) % 25 == 0:
-            print(f"  --- {ok} ok, {skip} already-done, {fail} fail, {i+1}/{len(mine)} ---", flush=True)
-    print(f"\n=== SHARD {si}/{sn} DONE: {ok} processed, {skip} already-done, {fail} failed ===", flush=True)
+            print(f"  --- {ok} ok, {skip} done, {skipbad} skip-corrupt, {fail} fail, {i+1}/{len(mine)} ---", flush=True)
+    print(f"\n=== SHARD {si}/{sn} DONE: {ok} processed, {skip} already-done, {skipbad} skip-corrupt, {fail} failed ===", flush=True)
     if failed:
         open(f"/media/skr/storage/paper_reproduction/egoX/local/stage1_failed_{si}_{sn}.txt", "w").write("\n".join(failed) + "\n")
 

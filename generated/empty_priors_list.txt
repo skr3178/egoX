@@ -1,0 +1,63 @@
+# Black / darkened ego-priors — FULL scan of cooking_train/videos
+# scanned 125 priors  |  BLACK(<1%)=26  DARKENED(1-10%)=5  OK(>=10%)=94  MISSING=2
+# harmful (black+dark+missing) = 33 of 127
+# of which in TRAIN(84): black=17 dark=4  |  in VAL(20): black=5 dark=1
+
+## BLACK priors (coverage <1% — pure black, actively harmful)  [26]
+    cov  set    clip
+  0.00%  train  georgiatech_cooking_01_03_2_1000_1048
+  0.00%  train  georgiatech_cooking_01_03_2_2000_2048
+  0.00%  train  georgiatech_cooking_14_01_2_1000_1048
+  0.00%  train  georgiatech_cooking_14_01_2_2000_2048
+  0.00%  train  georgiatech_cooking_14_01_2_2451_2499
+  0.00%  train  georgiatech_cooking_14_01_2_877_925
+  0.00%  train  georgiatech_cooking_14_01_6_1000_1048
+  0.00%  train  georgiatech_cooking_14_01_6_2000_2048
+  0.00%  train  georgiatech_cooking_14_01_6_2451_2499
+  0.00%  train  georgiatech_cooking_14_01_6_877_925
+  0.00%  val    iiith_cooking_01_1_2451_2499
+  0.00%  val    iiith_cooking_02_1_1000_1048
+  0.00%  val    iiith_cooking_02_1_2451_2499
+  0.00%  val    iiith_cooking_02_1_877_925
+  0.00%  val    iiith_cooking_02_3_2000_2048
+  0.00%  train  iiith_cooking_04_1_877_925
+  0.00%  train  iiith_cooking_05_1_1000_1048
+  0.00%  train  iiith_cooking_05_3_1000_1048
+  0.00%  train  iiith_cooking_05_3_2451_2499
+  0.00%  train  iiith_cooking_05_5_877_925
+  0.00%  —      iiith_cooking_110_4_877_925
+  0.00%  —      iiith_cooking_111_5_877_925
+  0.05%  train  iiith_cooking_03_1_2000_2048
+  0.15%  —      iiith_cooking_109_5_877_925
+  0.39%  —      iiith_cooking_109_2_2451_2499
+  0.57%  train  iiith_cooking_03_3_1000_1048
+
+## DARKENED priors (coverage 1-10% — nearly blank)  [5]
+    cov  set    clip
+  1.30%  val    iiith_cooking_02_3_2451_2499
+  1.45%  train  iiith_cooking_04_1_1000_1048
+  1.49%  train  iiith_cooking_05_3_877_925
+  5.05%  train  iiith_cooking_05_1_2000_2048
+  7.58%  train  iiith_cooking_03_3_877_925
+
+## MISSING ego_Prior.mp4 entirely  [2]
+     --  —      iiith_cooking_111_2_1000_1048
+     --  —      iiith_cooking_112_2_877_925
+
+## By take (bad windows / total windows with a prior)
+2/3 bad   georgiatech_cooking_01_03_2
+4/4 bad   georgiatech_cooking_14_01_2
+4/4 bad   georgiatech_cooking_14_01_6
+1/4 bad   iiith_cooking_01_1
+3/4 bad   iiith_cooking_02_1
+2/4 bad   iiith_cooking_02_3
+1/4 bad   iiith_cooking_03_1
+2/4 bad   iiith_cooking_03_3
+2/4 bad   iiith_cooking_04_1
+2/4 bad   iiith_cooking_05_1
+3/3 bad   iiith_cooking_05_3
+1/4 bad   iiith_cooking_05_5
+1/3 bad   iiith_cooking_109_2
+1/2 bad   iiith_cooking_109_5
+1/3 bad   iiith_cooking_110_4
+1/1 bad   iiith_cooking_111_5

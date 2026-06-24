@@ -1,0 +1,8 @@
+# Takes whose ego_prior renders BLACK (no conditioning signal) — skip during Stage-1 generation.
+# Pre-seeded with whole-take failures from the 2026-06-24 scan; grown on the fly by stage1_full.py
+# (when a clip's prior renders <1% coverage, its take is appended here and its other windows skipped).
+georgiatech_cooking_14_01_2
+georgiatech_cooking_14_01_6
+iiith_cooking_05_3
+iiith_cooking_115_2
+iiith_cooking_115_5

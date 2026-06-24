@@ -1,0 +1,41 @@
+# Full scan of cooking_train/videos ego_Prior.mp4  (123 priors)
+# BLACK(<1%)=26  DARKENED(1-10%)=5  OK(>=10%)=92  missing=2
+
+## BLACK (<1%)
+  0.00%  georgiatech_cooking_01_03_2_1000_1048
+  0.00%  georgiatech_cooking_01_03_2_2000_2048
+  0.00%  georgiatech_cooking_14_01_2_1000_1048
+  0.00%  georgiatech_cooking_14_01_2_2000_2048
+  0.00%  georgiatech_cooking_14_01_2_2451_2499
+  0.00%  georgiatech_cooking_14_01_2_877_925
+  0.00%  georgiatech_cooking_14_01_6_1000_1048
+  0.00%  georgiatech_cooking_14_01_6_2000_2048
+  0.00%  georgiatech_cooking_14_01_6_2451_2499
+  0.00%  georgiatech_cooking_14_01_6_877_925
+  0.00%  iiith_cooking_01_1_2451_2499
+  0.00%  iiith_cooking_02_1_1000_1048
+  0.00%  iiith_cooking_02_1_2451_2499
+  0.00%  iiith_cooking_02_1_877_925
+  0.00%  iiith_cooking_02_3_2000_2048
+  0.00%  iiith_cooking_04_1_877_925
+  0.00%  iiith_cooking_05_1_1000_1048
+  0.00%  iiith_cooking_05_3_1000_1048
+  0.00%  iiith_cooking_05_3_2451_2499
+  0.00%  iiith_cooking_05_5_877_925
+  0.00%  iiith_cooking_110_4_877_925
+  0.00%  iiith_cooking_111_5_877_925
+  0.05%  iiith_cooking_03_1_2000_2048
+  0.15%  iiith_cooking_109_5_877_925
+  0.39%  iiith_cooking_109_2_2451_2499
+  0.57%  iiith_cooking_03_3_1000_1048
+
+## DARKENED (1-10%)
+  1.30%  iiith_cooking_02_3_2451_2499
+  1.45%  iiith_cooking_04_1_1000_1048
+  1.49%  iiith_cooking_05_3_877_925
+  5.05%  iiith_cooking_05_1_2000_2048
+  7.58%  iiith_cooking_03_3_877_925
+
+## MISSING ego_Prior.mp4
+iiith_cooking_110_4_2000_2048
+iiith_cooking_112_2_2000_2048
