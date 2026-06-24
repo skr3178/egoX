@@ -72,6 +72,14 @@ setsid nohup bash -c 'PYTHONNOUSERSITE=1 HF_HUB_ENABLE_HF_TRANSFER=0 \
 - Only the **depth** stage differs (VDA backbone). Intrinsics identical; per-clip speed ~same as vitL.
 - The win is **memory → parallelism**, not per-clip speed. Cost: slightly more temporal depth flicker.
 - Checkpoints local: `~/.cache/torch/hub/checkpoints/video_depth_anything_vits.pth` (+ dinov2_vits14, MoGe-2).
+- **EMPIRICAL (2026-06-24): vitL does NOT improve the prior.** Ran `lyra` (vitL) on
+  `fair_cooking_06_6_1000_1048` (isolated `/media/skr/SeagateHub1/egoexo4d/vitL_prior_cmp/`,
+  `local/run_vitL_prior_cmp.sh`) vs the dataset's vitS prior: prior **coverage 0.330 (vitL) vs 0.369
+  (vitS)** — vitL is marginally *sparser*; depths agree at **Pearson r=0.90 / 7.5% median rel-diff**
+  (vitL only adds depth range [0.4,30] vs [0.5,8.8], irrelevant to the close ego view). The prior's
+  sparsity is set by the **renderer** (background-only + subsample + splat + exo→ego occlusion), not
+  the depth backbone → **vitS is the right choice; upgrading depth is not a lever** (see §1 prior levers).
+  Compare GIF: `previews/prior_vitS_vs_vitL.gif`.
 
 ### Inspection previews (built for the 5-sample test)
 `previews/vits5_grid.png` (5× ego_GT|ego_Prior), `previews/vits5/<clip>_cmp.mp4` (exo|ego_GT|ego_Prior),
@@ -105,10 +113,26 @@ poorer than the paper's (vitS + no-SLAM + background-only) → it carries little
 which plausibly limits ceiling on hand-object fidelity. ckpt-100's predicted ego (coarse warm field where
 GT has food + gray blob where hands are) is consistent with "tracking the coarse prior, undertrained for detail."
 
-**Levers if priors prove limiting (cost ↑):** (a) vitL depth; (b) feed Aria MPS semi-dense SLAM points
-(renderer already prefers them → much denser); (c) larger `point_size` / no subsample / point dilation;
-(d) keep foreground (drop the `instance==0` filter) so hands appear in the prior. Defer until a *mature*
-checkpoint shows the prior — not training maturity — is the bottleneck.
+**Prior↔ego_GT MISALIGNMENT (investigated 2026-06-24):** overlaying the prior on ego_GT shows the
+board/counter are **warped/"twisted"**, not crisply aligned. Root-caused:
+- **NOT a camera-angle / projection-orientation bug.** `render_points_fisheye` (`:989-1005`) applies an
+  OpenCV→pytorch3d flip + a hard-coded **90° CCW** "aria_cam" rotation. Swept that rotation
+  (id/cw/ccw/180, `previews/prior_orient_row.png`): the default **ccw is the best of the four** (board
+  ~horizontal & central like GT; others rotate it away) → orientation handling is **correct**.
+- **IT IS the point-cloud depth geometry.** The residual warp survives every rotation → the 3D points are
+  mis-placed: **ViPE monocular-depth scale** (not metric-aligned to the Aria-MPS ego world) + **wide
+  exo→ego baseline** + pose error → points land at wrong distance and **smear along viewing rays**.
+  The projection math is fine; its *input geometry* is off. Chain: ViPE mono-depth cloud (exo frame,
+  up-to-scale) → Aria world via `T_cam_to_world=inv(exo_extrinsic)` (`:1369`) → ego fisheye. The
+  ViPE-metric ↔ Aria-metric scale mismatch is the prime suspect. Train/infer-CONSISTENT (same renderer
+  both sides) → a quality ceiling, not a correctness bug.
+
+**Levers if priors prove limiting (cost ↑):** (a) **metric/scale-aligned depth** (`metric_vda`, or solve
+the ViPE↔Aria depth scale from the ego poses) — most likely to fix the warp; (b) feed **Aria MPS
+semi-dense SLAM points** (renderer already prefers them → denser AND already in the Aria metric world,
+sidesteps the scale problem); (c) larger `point_size` / no subsample / dilation; (d) keep foreground
+(drop `instance==0`) so hands appear. **vitL is NOT a lever** (§1 vitS-vs-vitL: depth backbone ≈ no
+change). Defer until a *mature* checkpoint shows the prior — not training maturity — is the bottleneck.
 
 ---
 
