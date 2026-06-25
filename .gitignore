@@ -4,6 +4,9 @@ gdrive_files/
 # Ego-Exo4D metadata + linked raw data (large; fetch separately)
 egoexo4D/
 
+# Symlink to the cooking training dataset on the external Seagate disk (never commit)
+cooking_train
+
 # Model weights / checkpoints (never commit)
 checkpoints/
 *.safetensors

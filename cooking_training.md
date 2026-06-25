@@ -80,9 +80,30 @@ automatically, in the trainer's precompute (never pre-resize the files).
   download was **cancelled**.
 - The authors' faithful `data_preprocess/` pipeline uses per-take calib, but the benefit is marginal
   (Aria RGB cams are near-identical). **Use the built-in generic coeffs.**
-- ⚠️ Open render-config bug: the earlier fisheye render gave a circular-180° projection (from the
-  `--fish_eye_rendering` flag/FOV), not a calibration problem — needs a render-config fix so it
-  produces the frame-filling Aria fisheye that aligns with the ego_GT.
+- ✅ RESOLVED 2026-06-24 — fisheye render verified faithful (was a false alarm). Controlled
+  **same-clip** comparison (`cmu_soccer06_6_877_925`, an author example we also rendered locally):
+  our `--fish_eye_rendering` prior ≈ the author's shipped `ego_Prior.mp4` (non-dark coverage
+  **0.58 vs 0.62**, same fisheye framing). The earlier "circular-180°" complaint was the
+  **non-fisheye** exploratory render (`local/egoprior_render_out/`), which is rectilinear and
+  NOT wired into training.
+  - **Basis for "fisheye":** (1) the render invocation uses `--fish_eye_rendering`
+    (`local/stage1_cooking_clip.py:146`), and (2) the same-clip visual match above (our render's
+    circular FOV + structure ≈ author's). That is the evidence — nothing else is needed.
+  - ❌ A corner/center brightness-ratio "signature" was tried and **rejected** — it does NOT
+    discriminate fisheye from rectilinear. Across all 104 cooking priors (all rendered with the
+    SAME `--fish_eye_rendering` flag) the ratio ranges **0.00–41.32**, and the author's own
+    shipped fisheye priors span **0.17–1.27** — fully overlapping the non-fisheye ref (0.77).
+    The ratio is scene/content-dependent noise, not a projection signature. Do not use it.
+  - **Training uses FISHEYE priors**, per the paper. The remaining cooking-prior roughness is a
+    **Stage-1 reconstruction-density** issue (close-range, cluttered, textureless counters →
+    sparser ViPE point cloud), NOT a render bug. Repro scripts: `local/prior_paper_vs_ours.py`,
+    `local/prior_samecllip_author_vs_ours.py`.
+  - ⚠️ **Separate data-quality finding (2026-06-24):** a non-trivial fraction of the 104 cooking
+    priors are **empty / near-empty** (mid-frame non-dark coverage ≈ 0 — e.g. all
+    `georgiatech_cooking_14_01_*`, several `iiith_cooking_0x`). These are degenerate Stage-1
+    reconstructions (no usable point cloud), distinct from the fisheye question. Worth screening
+    priors by coverage before/within training-meta assembly so blank priors aren't used as
+    conditioning. (Verify which of these are actually in `meta_train_84`.)
 
 ## 8. Pipeline pieces — what exists vs to-build
 
@@ -90,7 +111,7 @@ automatically, in the trainer's precompute (never pre-resize the files).
 |---|---|
 | vit-L ViPE (`vipe infer -p lyra`) | ✅ exists + validated (`local/run_vipe_accurate.sh`) |
 | depth zip → npy (`convert_depth_zip_to_npy.py`) | ✅ exists |
-| ego-prior render (`render_vipe_pointcloud.py`) | ✅ exists — ⚠️ fisheye config needs fix |
+| ego-prior render (`render_vipe_pointcloud.py`) | ✅ exists + verified faithful vs author prior (fisheye, same-clip 0.58 vs 0.62) |
 | **Authors' batch pipeline** (`data_preprocess/scripts/infer_vipe_all_takes.sh`, `config.sh`, `dataset_info.csv`, `postprocess_render_dir.py`) | ⚠️ **exists — not yet evaluated**; may cover most of Phase B |
 | 49-frame trimmer (full take → windows) | ❓ check authors' pipeline first; else build |
 | cooking training-meta assembly | ⚠️ adapt `local/gen_stageB_inputs.py` (currently example-clips only) |
