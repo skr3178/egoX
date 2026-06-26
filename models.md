@@ -533,6 +533,55 @@ transformer in **bf16 (~28 GB) → won't fit 24 GB**. Add the NF4 `BitsAndBytesC
 `fuse_lora`'d into already-quantized weights → either run the LoRA **unfused as a PEFT adapter**,
 or load bf16 → `fuse_lora` → **then** quantize the fused model.
 
+### Paper vs ours — training-config comparison (multi-domain) — 2026-06-26
+
+Our **multi-domain mix run** (cooking + diverse50) vs the paper. Unlike the earlier cooking-only
+repro, "ours" now covers **all 17 EgoX domains** (8 parent tasks: Basketball, Dance, Cooking,
+Health, Soccer, Bike Repair, Music, Rock Climbing — split into 17 take-prefixes). **Domain
+coverage is identical to the paper** (same Ego-Exo4D set); the remaining gap is **clips-per-domain**
+(552 vs ~3,510), not which domains. (Verified: our mix prefixes ≡ the full EgoX prefix set, 0 missing.)
+
+**Ours — multi-domain run settings**
+
+| setting | value |
+|---|---|
+| dataset | **552 clips (495 train / 57 val), all 17 EgoX domains** (cooking + diverse50) |
+| epochs | 16 planned — **stopped at ~6.5** (checkpoint-800) |
+| steps | **~800 actual** (of ~1,984 planned = 16 × ~124 steps/epoch) |
+| GPUs | 1 × 24 GB (RTX PRO 4000 Blackwell) |
+| effective batch | 4 (1 × grad_accum 4) — matches the paper |
+| resolution | 49×176×704 |
+| LoRA / precision | rank 128, α 128, **NF4 QLoRA** + 8-bit AdamW |
+| LR / scheduler | 2e-5, constant_with_warmup (warmup 30) — same LR + scheduler as the paper |
+| cache / output | NVMe (`/media/skr/storage/egoX_mix_train`) |
+
+**3-way comparison**
+
+| | paper | ours (cooking, old) | ours (multi-domain, new) |
+|---|---|---|---|
+| steps | ~130,000 | ~3,900 | **~800** (of 1,984 planned) |
+| epochs | 150 | ~100 | **~6.5** (of 16) |
+| GPUs | 4 (≥140 GB) | 1 (24 GB) | **1 (24 GB)** |
+| resolution | 448×1232 | 176×704 | **176×704** |
+| precision | bf16 r256 | NF4 r128 | **NF4 r128** |
+| data (clips) | ~3,510 | 153 cooking | **552** |
+| domains | all 17 (8 parent) | 1 (cooking) | **all 17 (8 parent) — same as paper** |
+
+**Reading it:**
+- **Domain coverage now EQUALS the paper:** we use **all 17 EgoX domains** (every domain in the
+  dataset), vs single-domain cooking before. So the gap is **no longer about which domains** — it's
+  **clips-per-domain** (552 vs ~3,510 total ⇒ ~6.4× fewer, thinner per domain). This is why the
+  mix model is more responsive / generalizes better (e.g. the joker eval) than cooking-only.
+- **Still deliberately scaled down:** ~162× fewer steps (800 vs 130k; ~66× if the planned 1,984
+  finished), ~4.5× fewer tokens (176×704 = 124k px vs 448×1232 = 552k px), 1 vs 4 GPUs, NF4-r128
+  vs bf16-r256. LR (2e-5) + scheduler (constant_with_warmup) + effective batch (4) **match** the paper.
+- **Regime difference:** paper ~150 ep, old cooking ~100 ep (heavy per-clip → overfit risk on a
+  tiny set), mix only ~6.5 ep — fewer passes over far more, varied data (val still descending, no
+  overfit). So the mix is a **partially-trained** multi-domain repro — resuming checkpoint-800 →
+  the full 1,984 steps would complete the planned regime.
+- 150 epochs only makes sense over the paper's ~3,510-clip set; copying it onto 552 (let alone
+  104–153) clips would massively overfit.
+
 ### Training time & resolution estimate (24 GB, cooking subset) — 2026-06-23
 
 Target: QLoRA-train small-scale EgoX on the cooking takes (**259 takes → 889 clips**),

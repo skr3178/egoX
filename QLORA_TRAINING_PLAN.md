@@ -218,6 +218,38 @@ train_epochs 100, ckpt every 100 (limit 10), report_to tensorboard.
 **Wall-clock:** ~84 s/optimizer-step (grad_accum 4 × ~21 s/micro-step) → 100 ep ≈ **~60 h** (300 ep ≈ ~180 h);
 loss signal visible in ~30–60 min, first checkpoint ~2–3 h. Stoppable + resumable.
 
+### Training duration — paper vs ours (steps == epochs, and why the paper trains so long)
+**"150 epochs" and "~130k steps" are the same run.** epoch = one pass over the data; step = one optimizer
+update (a batch). Paper: ~3,510 clips ÷ batch 4 ≈ **878 steps/epoch × 150 ≈ ~130k steps**
+(4 GPUs, ≥140 GB, full-res 49×448×1232, LoRA r256, LR 2e-5). Wall-clock is **not stated** in the
+README/paper materials — only the config; a full-res 14B LoRA for ~130k steps on 4 GPUs is plausibly
+several days to ~a week (estimate, not documented).
+
+**Why the paper trains ~130k steps:**
+1. **Diffusion is sample-inefficient** — each step sees ONE random timestep + noise draw per clip; covering
+   the whole denoising schedule × all clips × temporal dynamics needs each clip seen many times (150×).
+2. **The paired set is small (~3,510 clips), so steps are bought with epochs** — can't get 130k updates
+   from data *volume* (not web-scale), so they get them from *repetition* (many epochs).
+3. **Hard, multi-domain task** — cross-view *video* gen (novel viewpoint + temporal coherence + GGA geometry)
+   across cooking/sports/bike/dance needs more updates to fit through a frozen 14B + LoRA.
+4. **Perceptual quality keeps improving past the loss plateau** — MSE flattens early but sample
+   sharpness/coherence keep improving, so they train to perceptual convergence, not to loss-floor.
+
+**Why ours is far shorter (and should be):** 153 cooking clips, single-domain → ~39 steps/epoch, **val_loss
+already plateaus (~0.226) by ~1,000 steps**. A small, narrow set saturates fast; copying 150 epochs here
+would just overfit. Our run: 100 ep ≈ **3,900 steps** (~2 days, 1×24 GB, NF4 r128, 176×704) — a deliberately
+scaled-down single-domain repro. **The paper's length is the cost of a large, diverse, multi-domain set
+trained to perceptual convergence — not an intrinsic need for 130k steps; it scales with data+diversity.**
+
+| | paper | ours |
+|---|---|---|
+| epochs / steps | 150 / ~130k | 100 / ~3,900 |
+| data | ~3,510 clips, multi-domain | 153 clips, cooking only |
+| GPUs / VRAM | 4 / ≥140 GB | 1 / 24 GB |
+| resolution | 49×448×1232 | 49×176×704 |
+| precision / LoRA | bf16 / r256 | NF4 QLoRA / r128 |
+| convergence | ~perceptual (long) | val plateau ~1k steps |
+
 ---
 
 ## 4. EgoX submodule code changes (local, uncommitted)

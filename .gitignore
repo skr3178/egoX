@@ -4,8 +4,9 @@ gdrive_files/
 # Ego-Exo4D metadata + linked raw data (large; fetch separately)
 egoexo4D/
 
-# Symlink to the cooking training dataset on the external Seagate disk (never commit)
+# Symlinks to training datasets on the external Seagate disk (never commit)
 cooking_train
+diverse50_train
 
 # Model weights / checkpoints (never commit)
 checkpoints/
@@ -26,3 +27,4 @@ wan_smoketest/outputs/
 
 # Blackwell local scratch: scripts, runs, render outputs (never pushed)
 local/
+egoX_mix_train
