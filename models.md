@@ -582,6 +582,40 @@ coverage is identical to the paper** (same Ego-Exo4D set); the remaining gap is 
 - 150 epochs only makes sense over the paper's ~3,510-clip set; copying it onto 552 (let alone
   104–153) clips would massively overfit.
 
+#### Quantitative results — mix-r128 ckpt-800 vs paper (image criteria) — 2026-06-26
+
+Generated ego with **mix checkpoint-800** on **8 held-out val clips** (one per domain: basketball,
+bike, bouldering, cooking, covid, covidtest, cpr, dance), scored vs `ego_GT` on the right-HxH ego
+half, frame-aligned. Harness: `scripts/eval_image_metrics.py` (PSNR/SSIM via cv2, LPIPS=alex,
+CLIP-I=ViT-B/32). Run with `HF_HUB_ENABLE_HF_TRANSFER=0` (env has the hf_transfer gotcha).
+
+| | PSNR↑ | SSIM↑ | LPIPS↓ | CLIP-I↑ |
+|---|---|---|---|---|
+| ours mix-r128 ckpt800 — scored @448 (gen↑) | 10.98 | 0.473 | 0.767 | 0.783 |
+| ours mix-r128 ckpt800 — scored @176 (GT↓, native) | 10.96 | 0.322 | 0.658 | 0.782 |
+| **paper EgoX (Seen)** | **16.05** | **0.556** | **0.498** | **0.896** |
+| ref: shipped r256 LoRA @full-448, 1 soccer clip | 17.83 | 0.691 | — | — |
+
+**Per-clip @448 (best→worst PSNR):** cpr 13.75 · dance 12.14 · cooking 11.90 · covid 10.83 ·
+basketball 10.66 · bike 9.85 · covidtest 9.34 · bouldering 9.32 (data-rich domains score best;
+high-black-loss domains — bouldering/covidtest — worst).
+
+**Honest framing (a prior claim was corrected here):**
+- We trail the paper (~11 PSNR / ~0.4 SSIM vs 16 / 0.56). **This gap is real — NOT a scoring
+  artifact.** An earlier hypothesis that upscaling our 176 gen → 448 was inflating the gap was
+  **wrong**: re-scoring at the model's native 176 (downscale GT → 176) leaves PSNR ≈ unchanged
+  (10.96 vs 10.98), CLIP-I flat, *lowers* SSIM (0.32), and only helps LPIPS. The number is genuine
+  at any scoring resolution.
+- **Real causes of the gap:** (1) **undertrained** — ckpt-800 = 6.5 of 16 planned epochs (val 0.183,
+  still descending); (2) **lower model output fidelity** — our model *outputs* 176² detail vs the
+  paper's 448² (a genuine 24 GB capability limit, shows at any scoring res — it's the model, not the
+  metric); (3) NF4-r128 vs bf16-r256, 552 vs ~3,510 clips, n=8 vs full-set average.
+- **Pipeline is faithful:** the shipped r256 LoRA at its native 448 hit **17.83** PSNR on a soccer
+  clip (above the paper's seen average) on our inference stack — so the method/inference reproduce;
+  the mix number is the honest cost of the scaled-down (176-res, undertrained, NF4-r128) budget.
+- Biggest lever to close the gap: **finish training** (resume ckpt-800 → 16 epochs); resolution is
+  capped by 24 GB.
+
 ### Training time & resolution estimate (24 GB, cooking subset) — 2026-06-23
 
 Target: QLoRA-train small-scale EgoX on the cooking takes (**259 takes → 889 clips**),
